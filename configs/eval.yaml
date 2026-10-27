@@ -1,0 +1,109 @@
+# Evaluation configuration: test-time training + generation + scoring.
+#
+#   python run_eval.py checkpoint=<run_name>/latest-step-step=00001650.ckpt
+#
+# Any key can be overridden on the command line.
+
+defaults:
+  - _self_
+  - override hydra/job_logging: none
+  - override hydra/hydra_logging: none
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null
+
+# === Stages ===
+# generate: adapt on each example's context and generate (needs GPUs)
+# score:    score the stored generations (CPU only)
+stages:
+  - generate
+  - score
+
+# === What to evaluate: subsets x models x metrics ===
+# Subsets: `all`, or any of aime25, aime26, hmmt_feb_2026, hmmt_nov_2025,
+# apex_2025, theoremqa, imobench, cmimc_2025, arxivmath, gpqa_diamond,
+# olympiadbench. The model is a label that names the output folder.
+eval_subsets:
+  - all
+eval_models:
+  - Qwen/Qwen3-4B-Instruct-2507
+eval_metrics:
+  - pass@1                          # greedy, 1 sample; `pass@k` samples `passk_num_samples`
+
+# Trajectory tier: filters rows by their `model` column
+# (mixed-low-quality | mixed-middle-quality | mixed-high-quality).
+source_model: mixed-low-quality
+
+# === Checkpoint ===
+# Lightning .ckpt path, relative to output_dir or absolute.
+checkpoint: ""
+
+# === Base model and architecture (must match the training run) ===
+model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
+peft_lora: true
+lora_rank: 256
+lora_alpha: 128
+use_rslora: true
+lora_target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+mem_depth: 4
+inner_start: 32
+inner_end: 36
+attn_implementation: flash_attention_2   # eager | sdpa | flash_attention_2
+bf16: true
+
+# === Inner loop (test-time training) ===
+inner_loop_type: rgu               # recursive gradient unrolling
+outer_loss_type: ce                 # cross-entropy
+n_inner_iter: 4                     # inner-loop update steps
+inner_lr: 1.0e-4
+inner_grad_accum: 1                 # minimum number of groups the context is split into per inner step
+                                    # (contexts over 8192 tokens are split further automatically)
+unroll_start: 2                     # inner steps before this index are not differentiated through
+inner_opt: adamw
+inner_beta1: 0.9                    # inner AdamW settings; must match training
+inner_beta2: 0.95
+inner_eps: 1.0e-10
+weight_decay: 0.01                  # also the inner-loop weight decay; must match training
+c_kl: 0.1
+outer_reg_lambda: 0.0
+
+# === Token weighting (must match the training run) ===
+weighted_loss: true
+weight_normalize: false
+weight_non_linearity: softplus
+weighting_model: linear
+
+# === Generation (Hugging Face generate) ===
+max_new_tokens: 16384
+pass1_temperature: 0.0
+pass1_num_samples: 1
+passk_temperature: 0.7
+passk_num_samples: 8
+passk_top_p: 0.95
+
+# === Data ===
+eval_repo_prefix: <org>/math-eval-sources     # -high / -middle / -low are appended
+eval_revision: null
+num_thinking: 8                     # trajectories per evaluation problem
+conditioned: true                   # prefix every trajectory with its problem statement
+strip_generated_boxed_answers: true   # drop the final boxed-answer sentence from trajectories; must match training
+max_context_length: 20480           # not applied at evaluation: every context is adapted on (only training skips long ones)
+packing: true                       # pack the context into one padding-free sequence
+max_eval_data: 10000                # evaluate at most this many problems per subset
+
+# === Output ===
+# Results land in <output_dir>/<run_name>/ (outputs/, evals/, config.json).
+output_dir: ./outputs
+run_name: eval_run
+
+# === Hardware ===
+accelerator: gpu                    # gpu | cpu
+n_gpu: 1                            # GPUs to run the generate stage on
+
+# === Misc ===
+resume: true                        # keep finished generations and skip them on rerun
+seed: 42

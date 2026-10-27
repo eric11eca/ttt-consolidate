@@ -1,0 +1,25 @@
+Vendored from https://github.com/eth-sri/matharena at commit e921f1a (MIT, Copyright (c) 2024 SRI Lab, ETH Zurich).
+
+## Deviations from upstream
+
+The vendored `parser.py` and `parse_manual.py` are unchanged except loguru -> stdlib `logging`, the package-relative import, and a small block in `parser.py` that loads sympy's LaTeX parser against the vendored antlr4 4.11.1 (`prepare_vendored_antlr`, `ensure_latex_backend`). Grading runs in a worker subprocess (`opt_math/grading/pool.py`) that puts the vendored antlr4 first on `sys.path` and never imports omegaconf; a call that runs longer than 20 s kills and restarts the worker and counts as wrong. All other deviations are in `opt_math/grading/patches.py` and apply before or around MathArena's `check_answers`. Every rule fails closed: unparseable or ambiguous means wrong.
+
+1. Strict extraction (`strict_parsing=True`): the answer must come from the last `\boxed{...}`. No box, an empty box or an unparseable box is wrong. Upstream falls back to the last integer in the text.
+2. A gold that contains `\boxed{...}` is reduced to the boxed content before grading.
+3. Boolean golds (True/False/Yes/No): the last box must be exactly that word (True==Yes, False==No), or the word plus one comma clause ("Yes, it is possible"). Any box containing the opposite word is wrong. No box is wrong.
+4. Tuple golds (a list of parenthesised tuples): the last box is compared as an unordered collection of tuples, each component checked with `check_answers`. A trailing condition ("for n >= 1") is dropped from the gold. It is dropped from the answer only if no tuple follows the condition word. Golds with other free text go to MathArena.
+5. Rounded decimal golds (nonzero fractional part, d decimals): accept iff |answer - gold| < 0.5*10^-d and the answer, if written as a plain number, has at least d decimals. Symbolic answers are evaluated numerically. Golds like `3.0` are integers and compared exactly.
+6. List golds: `AnswerList` drops items without digits, so "A, C" matched "B, D". Grading is wrong if the parsed gold or answer list has a different length than its comma split, or the gold list is empty. Single-letter choice lists ("A, C") are compared as letter sets instead.
+7. Bracketed list golds (`[2, 4]`): graded as the list `2, 4`; the answer may be `2, 4` or `[2, 4]`, but not `(2, 4)`.
+8. Thousands-separator golds (`1,000`): commas stripped, no list mode; `\boxed{1, 0}` is wrong.
+9. Normalized exact accept (runs first, accepts only, never rejects): if the last box equals the gold after normalization the answer is correct. Normalization strips `$`, `\text`/`\textbf`/`\mathrm`/`\operatorname` wrappers, `\left`/`\right`, LaTeX spacing (`\,` `\;` `\!` `\quad` `~`), turns `\dfrac`/`\tfrac` into `\frac`, drops braces around single characters in `^{2}`/`_{1}`, removes whitespace, lowercases and drops a trailing period. On a mismatch the other rules decide.
+10. Bracketed lists of plain numbers with at least one decimal (`[-1.78..., 0.28...]`): each answer item is checked against a gold item with the rounded-decimal rule (symbolic items allowed), in any order.
+11. Parenthesised choice-letter golds (`(d)`): the last box must be that single letter in any common form (`D`, `(d)`, `\text{(D)}`, `\textbf{D}`, `D)`), case-insensitive.
+12. Percent: a percentage gold and/or last box (`7.50\%`, `62.5%`) is divided by 100 before grading, so `0.075` matches `7.50\%` but not `7.5`.
+13. Vector transpose: a trailing `^T`, `^{T}`, `^\top` on a bracket-list box is dropped.
+14. theoremqa only (`source="theoremqa"`): a nonzero integer-looking gold (`3650.0`, `2041`) also accepts a last box that parses strictly to a real number within 1% relative error. Accept-only; other sources are unchanged. Gold 0 stays exact.
+15. Two numbers in one box separated only by spacing or `\text{...}` (`5 \text{ or } 6`) are wrong; MathArena's parser would read that as 56.
+16. Worker protocol: every request carries an id, a reply with the wrong id or unparseable output restarts the worker and retries once, and fd 1 of the worker is redirected to stderr so stray writes cannot corrupt replies.
+17. Answer less precise than the gold (all sources, accept-only): a plain decimal answer with fewer decimals than a plain decimal gold is correct if it equals the gold rounded half-up to the answer's decimals and has at least 3 significant digits (every leading zero is ignored, so `0.368` qualifies while `0.083`, `0.1` and `0.000` do not) and the same sign as the gold.
+18. The theoremqa 1% rule is strict (`< 1%`). A percent box against a bare gold in percent units is correct if the number equals the gold (`10.92\%` vs `10.92`) or divided by 100 does (`23\%` vs `0.23`).
+19. A leading `(a, b) =` label in a tuple box is dropped when the names are plain variables and their count equals the tuple length. In the exact-match normalizer a space between a digit and a letter is dropped (`2 n` == `2n`). `\log_2 3` is no longer read as two numbers by the two-numbers guard.

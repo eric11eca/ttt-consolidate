@@ -1,0 +1,133 @@
+# Training configuration: meta-learning with LoRA adapters on Qwen3-4B-Instruct-2507.
+#
+#   torchrun --nproc_per_node=4 train.py
+#
+# Any key can be overridden on the command line, e.g. `train.py n_gpu=1 seed=1`.
+
+defaults:
+  - _self_
+  - override hydra/job_logging: none
+  - override hydra/hydra_logging: none
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null
+
+####### run / output #######
+output_dir: ./outputs               # run directory root; the run lives in <output_dir>/<wandb_name>
+wandb_name: qwen3-4b-math           # run folder name (and the logging display name)
+seed: 42
+
+checkpoint: "none"                  # checkpoint to load or resume from, relative to output_dir
+load_checkpoint: false              # load weights from `checkpoint` and start a fresh run
+resume_from_checkpoint: false       # resume the run in `checkpoint` (optimizer state included)
+
+do_train: true
+do_eval: false
+
+####### logging (off by default) #######
+use_wandb: false
+wandb_project: ttt-consolidate
+wandb_entity: null                  # your W&B team or user, when use_wandb=true (the API key comes from WANDB_API_KEY)
+
+####### model #######
+model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
+bf16: true
+attn_implementation: flash_attention_2   # eager | sdpa | flash_attention_2
+
+# LoRA adapters on the last `mem_depth` layers; the inner loop adapts layers
+# [inner_start, inner_end).
+peft_lora: true
+lora_rank: 256
+lora_alpha: 128
+lora_dropout: 0.0
+use_rslora: true                    # rank-stabilized LoRA scaling
+lora_target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+mem_depth: 4
+inner_start: 32
+inner_end: 36
+
+####### outer loop #######
+train_batch_size: 1                 # problems per step (the code supports 1)
+eval_batch_size: 1
+num_train_epochs: 1
+max_steps: null                     # stop after this many optimizer steps (null = run all epochs)
+gradient_accumulation_steps: 1
+learning_rate: 5.0e-5
+weight_decay: 0.01
+warmup_proportion: 0.03            # share of the steps spent warming up the learning rate
+adam_epsilon: 1.0e-8
+outer_beta1: 0.9                    # AdamW betas of the outer loop
+outer_beta2: 0.95
+max_grad_norm: 5.0
+callback_monitor: val_f1             # metric that ranks the best checkpoints
+val_check_interval: 0.0             # 0.0 = validate once per epoch
+latest_checkpoint_every_n_train_steps: 50      # overwrite-style "latest" checkpoint
+archive_checkpoint_every_n_train_steps: 500    # kept checkpoints
+archive_checkpoint_keep_last: -1               # >0 keeps only the newest N archives; -1 keeps all
+
+####### inner loop #######
+inner_loop_type: rgu               # recursive gradient unrolling
+outer_loss_type: ce                 # cross-entropy
+n_inner_iter: 4                     # inner-loop update steps
+inner_lr: 1.0e-4
+inner_opt: adamw                    # inner-loop optimizer
+inner_beta1: 0.9
+inner_beta2: 0.95
+inner_eps: 1.0e-10
+inner_grad_accum: 1                 # minimum number of groups the context is split into per inner step
+                                    # (contexts over 8192 tokens are split further automatically)
+unroll_start: 2                     # inner steps before this index are not differentiated through
+
+# Outer-loss regularization
+c_kl: 0.1                           # weight of the KL term that keeps the adapted model near the base model
+outer_reg_lambda: 0.0
+
+# Learned per-token loss weighting
+weighted_loss: true
+weighting_model: linear              # one linear layer on the hidden states
+weight_non_linearity: softplus
+weight_normalize: false             # rescale the weights of a sequence to sum to its token count
+
+####### hardware #######
+accelerator: gpu                    # gpu | cpu
+n_gpu: 4
+n_nodes: 1
+num_workers: 4
+
+####### data #######
+dataset_subset: aime25              # only selects the test split loaded alongside training
+dataset_cache_version: v1           # bump to invalidate the prepared-dataset cache
+
+# Dataset repositories. Each is a Hugging Face repo id or a local directory.
+# `*_revision` pins a git revision/commit of the repo (null = default branch).
+train_repo: <org>/open-parallel-think-math
+train_revision: null
+use_openthoughts: false             # also train on chunked OpenThoughts
+openthoughts_repo: <org>/openthoughts-114k-chunked
+openthoughts_revision: null
+eval_repo_prefix: <org>/math-eval-sources     # -high / -middle / -low are appended
+eval_revision: null
+
+# Training mixture. The release is re-sampled once per epoch; each entry is the
+# fraction of the release that epoch draws, in (0, 1]. The epochs are
+# concatenated, so the list length is the number of draws.
+epoch_sample_fractions: [1.0, 0.7, 0.5]
+openthoughts_config: "4096"         # OpenThoughts dataset configuration (chunk size)
+openthoughts_fraction: 0.1          # fraction of OpenThoughts that is sampled, in (0, 1]
+
+conditioned: true                   # prefix every trajectory with its problem statement
+strip_generated_boxed_answers: true   # drop the sentence with the final boxed answer from evaluation trajectories
+source_model: mixed-low-quality     # evaluation trajectory tier: mixed-{low,middle,high}-quality
+num_thinking: 8                     # trajectories per evaluation problem
+max_context_length: 32768           # a batch longer than this (tokens) is skipped
+packing: true                       # pack the context into one padding-free sequence
+max_eval_data: 50000
+
+####### generation (used when evaluation runs inside training) #######
+inference_max_new_tokens: 16384
+eval_resume: true                   # keep finished evaluation generations and skip them on rerun
+eval_resume_file: null
